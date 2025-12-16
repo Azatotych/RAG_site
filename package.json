@@ -2,7 +2,6 @@
   "name": "rag_site",
   "private": true,
   "version": "0.0.1",
-  "description": "Minimal chat UI for a local assistant",
   "type": "module",
   "scripts": {
     "dev": "vite",

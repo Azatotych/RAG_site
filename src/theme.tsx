@@ -10,7 +10,6 @@ interface ThemeContextValue {
 
 const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
 
-// Keep the storage key scoped to this project to avoid clashes with other demos on the same host.
 const storageKey = 'vas-theme';
 
 const getPreferredTheme = (): Theme => {

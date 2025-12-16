@@ -3,7 +3,6 @@ const tsPlugin = require('@typescript-eslint/eslint-plugin');
 const reactHooks = require('eslint-plugin-react-hooks');
 const reactRefresh = require('eslint-plugin-react-refresh');
 
-// Flat config tailored for the small SPA; keeps lint expectations minimal yet consistent across environments.
 const webGlobals = {
   window: 'readonly',
   document: 'readonly',
@@ -44,7 +43,7 @@ module.exports = [
     },
     rules: {
       ...reactHooks.configs.recommended.rules,
-      'react-refresh/only-export-components': ['warn', { allowExportNames: ['useTheme'] }],
+      'react-refresh/only-export-components': 'warn',
     },
   },
 ];
