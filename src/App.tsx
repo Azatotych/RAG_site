@@ -4,6 +4,7 @@ import rehypeSanitize from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
 
 type Role = 'user' | 'assistant' | 'error';
+type Role = 'user' | 'assistant';
 
 interface ChatMessage {
   id: string;
@@ -21,6 +22,7 @@ function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [stickToBottom, setStickToBottom] = useState(true);
   const listRef = useRef<HTMLDivElement | null>(null);
 
@@ -62,6 +64,13 @@ function App() {
   const submitMessage = async (event?: FormEvent<HTMLFormElement>) => {
     event?.preventDefault();
     if (!canSend) return;
+  const submitMessage = async (event?: FormEvent<HTMLFormElement>) => {
+    event?.preventDefault();
+    if (!canSend) return;
+    if (!requestUrl) {
+      setError('API не сконфигурирован. Проверьте переменные окружения.');
+      return;
+    }
 
     const userMessage: ChatMessage = {
       id: generateId(),
@@ -86,6 +95,7 @@ function App() {
 
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), 15000);
+    setError(null);
 
     try {
       const response = await fetch(requestUrl, {
@@ -131,6 +141,14 @@ function App() {
         setMessages((prev) => [...prev, errorMessage]);
         return;
       }
+      });
+
+      if (!response.ok) {
+        throw new Error(`Ошибка ${response.status}`);
+      }
+
+      const data: { reply?: string } = await response.json();
+      const replyText = data.reply ?? 'Ассистент не вернул ответ.';
 
       const assistantMessage: ChatMessage = {
         id: generateId(),
@@ -157,12 +175,22 @@ function App() {
       console.error('API request failed', err);
     } finally {
       window.clearTimeout(timeoutId);
+      console.error(err);
+      setError('Не удалось получить ответ от ассистента. Попробуйте ещё раз.');
+      const assistantMessage: ChatMessage = {
+        id: generateId(),
+        role: 'assistant',
+        content: 'Произошла ошибка при обращении к API.',
+      };
+      setMessages((prev) => [...prev, assistantMessage]);
+    } finally {
       setIsLoading(false);
     }
   };
 
   const clearChat = () => {
     setMessages([]);
+    setError(null);
   };
 
   return (
@@ -194,6 +222,7 @@ function App() {
                       : 'Сообщение об ошибке'
                 }
               >
+              <article key={message.id} className={`bubble ${message.role}`} aria-label={message.role === 'user' ? 'Сообщение пользователя' : 'Сообщение ассистента'}>
                 {message.role === 'assistant' ? (
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
@@ -241,6 +270,7 @@ function App() {
               </button>
               {isLoading && <span className="status">Генерация…</span>}
             </div>
+            {error && <div className="error" role="alert">{error}</div>}
           </form>
         </section>
       </main>
