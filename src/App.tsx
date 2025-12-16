@@ -1,3 +1,4 @@
+import { FormEvent, useEffect, useRef, useState } from 'react';
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import rehypeSanitize from 'rehype-sanitize';
@@ -49,6 +50,7 @@ function App() {
     listEl.scrollTo({ top: listEl.scrollHeight, behavior: 'smooth' });
   }, [messages, stickToBottom]);
 
+  const requestUrl = !apiBase || !chatEndpoint ? null : `${apiBase}${chatEndpoint}`;
   const requestUrl = useMemo(() => {
     if (!apiBase || !chatEndpoint) return null;
     return `${apiBase}${chatEndpoint}`;
