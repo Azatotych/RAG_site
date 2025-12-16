@@ -227,6 +227,12 @@ h3 {
 .error-meta {
   font-size: 0.9rem;
   color: rgba(187, 20, 46, 0.8);
+.error {
+  color: #8b0000;
+  background: #ffecec;
+  border: 1px solid rgba(139, 0, 0, 0.2);
+  padding: 0.5rem 0.75rem;
+  border-radius: 10px;
 }
 
 .sr-only {
