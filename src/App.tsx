@@ -227,6 +227,13 @@ function App() {
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
                     rehypePlugins={[rehypeSanitize]}
+                    components={{
+                      a: (props) => (
+                        <a {...props} target="_blank" rel="noreferrer">
+                          {props.children}
+                        </a>
+                      ),
+                    }}
                     linkTarget="_blank"
                     className="message-text"
                   >
