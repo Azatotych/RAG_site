@@ -9,4 +9,8 @@
   "include": [
     "vite.config.ts"
   ]
+    "allowSyntheticDefaultImports": true,
+    "types": ["node"]
+  },
+  "include": ["vite.config.ts"]
 }
