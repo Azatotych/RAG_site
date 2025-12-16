@@ -3,6 +3,9 @@
   --vas-emerald-600: #009e97;
   --vas-accent-amber: #ffb96a;
   --vas-white: #ffffff;
+  --vas-error-bg: rgba(187, 20, 46, 0.1);
+  --vas-error-border: rgba(187, 20, 46, 0.45);
+  --vas-error-text: #bb142e;
   --font-sans: "Golos", "Golos Text", system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
   --font-display: "Tectur", "Golos", "Golos Text", system-ui, "Segoe UI", Arial, sans-serif;
 }
@@ -99,6 +102,12 @@ h3 {
   margin-left: auto;
   background: var(--vas-emerald-900);
   color: var(--vas-white);
+}
+
+.bubble.error {
+  background: var(--vas-error-bg);
+  border: 1px solid var(--vas-error-border);
+  color: var(--vas-error-text);
 }
 
 .message-text {
@@ -205,6 +214,19 @@ h3 {
   font-weight: 600;
 }
 
+.error-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.error-title {
+  font-weight: 700;
+}
+
+.error-meta {
+  font-size: 0.9rem;
+  color: rgba(187, 20, 46, 0.8);
 .error {
   color: #8b0000;
   background: #ffecec;

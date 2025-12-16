@@ -3,12 +3,14 @@ import ReactMarkdown from 'react-markdown';
 import rehypeSanitize from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
 
+type Role = 'user' | 'assistant' | 'error';
 type Role = 'user' | 'assistant';
 
 interface ChatMessage {
   id: string;
   role: Role;
   content: string;
+  meta?: string;
 }
 
 const generateId = () => crypto.randomUUID?.() ?? `msg-${Date.now()}-${Math.random()}`;
@@ -52,6 +54,16 @@ function App() {
     return `${apiBase}${chatEndpoint}`;
   }, [apiBase, chatEndpoint]);
 
+  const createErrorMessage = (reason: string, requestUrlValue: string | null): ChatMessage => ({
+    id: generateId(),
+    role: 'error',
+    content: reason,
+    meta: requestUrlValue ?? 'URL не задан',
+  });
+
+  const submitMessage = async (event?: FormEvent<HTMLFormElement>) => {
+    event?.preventDefault();
+    if (!canSend) return;
   const submitMessage = async (event?: FormEvent<HTMLFormElement>) => {
     event?.preventDefault();
     if (!canSend) return;
@@ -70,6 +82,19 @@ function App() {
     setMessages(nextMessages);
     setInputValue('');
     setIsLoading(true);
+
+    if (!requestUrl) {
+      const errorMessage = createErrorMessage(
+        'Причина: не задан адрес API (VITE_API_BASE_URL или VITE_CHAT_ENDPOINT).',
+        requestUrl
+      );
+      setMessages((prev) => [...prev, errorMessage]);
+      setIsLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 15000);
     setError(null);
 
     try {
@@ -82,6 +107,40 @@ function App() {
           messages: nextMessages.map(({ role, content }) => ({ role, content })),
           stream: false,
         }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errorMessage = createErrorMessage(
+          `Причина: сервер API вернул HTTP ${response.status} ${response.statusText}.`,
+          requestUrl
+        );
+        setMessages((prev) => [...prev, errorMessage]);
+        return;
+      }
+
+      let data: { reply?: string } | null = null;
+      try {
+        data = await response.json();
+      } catch (err) {
+        const errorMessage = createErrorMessage(
+          'Причина: API вернул некорректный ответ (не JSON или отсутствует поле reply).',
+          requestUrl
+        );
+        setMessages((prev) => [...prev, errorMessage]);
+        console.error('Failed to parse JSON', err);
+        return;
+      }
+
+      const replyText = data?.reply;
+      if (!replyText) {
+        const errorMessage = createErrorMessage(
+          'Причина: API вернул некорректный ответ (не JSON или отсутствует поле reply).',
+          requestUrl
+        );
+        setMessages((prev) => [...prev, errorMessage]);
+        return;
+      }
       });
 
       if (!response.ok) {
@@ -99,6 +158,23 @@ function App() {
 
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (err) {
+      let reason = 'Причина: не удалось подключиться к серверу API (соединение отклонено или сервер не запущен).';
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        reason = 'Причина: превышено время ожидания ответа от API.';
+      } else if (err instanceof TypeError) {
+        const message = err.message.toLowerCase();
+        if (message.includes('name not resolved') || message.includes('dns')) {
+          reason = 'Причина: адрес API не найден (ошибка DNS или неверный URL).';
+        } else if (message.includes('failed to fetch')) {
+          reason = 'Причина: не удалось подключиться к серверу API (соединение отклонено или сервер не запущен).';
+        }
+      }
+
+      const errorMessage = createErrorMessage(reason, requestUrl);
+      setMessages((prev) => [...prev, errorMessage]);
+      console.error('API request failed', err);
+    } finally {
+      window.clearTimeout(timeoutId);
       console.error(err);
       setError('Не удалось получить ответ от ассистента. Попробуйте ещё раз.');
       const assistantMessage: ChatMessage = {
@@ -135,6 +211,17 @@ function App() {
               <div className="empty">Начните диалог, чтобы увидеть ответы ассистента.</div>
             )}
             {messages.map((message) => (
+              <article
+                key={message.id}
+                className={`bubble ${message.role}`}
+                aria-label={
+                  message.role === 'user'
+                    ? 'Сообщение пользователя'
+                    : message.role === 'assistant'
+                      ? 'Сообщение ассистента'
+                      : 'Сообщение об ошибке'
+                }
+              >
               <article key={message.id} className={`bubble ${message.role}`} aria-label={message.role === 'user' ? 'Сообщение пользователя' : 'Сообщение ассистента'}>
                 {message.role === 'assistant' ? (
                   <ReactMarkdown
@@ -145,6 +232,12 @@ function App() {
                   >
                     {message.content}
                   </ReactMarkdown>
+                ) : message.role === 'error' ? (
+                  <div className="message-text error-text">
+                    <div className="error-title">Ошибка: модель недоступна</div>
+                    <div className="error-reason">{message.content}</div>
+                    <div className="error-meta">URL: {message.meta}</div>
+                  </div>
                 ) : (
                   <p className="message-text">{message.content}</p>
                 )}
