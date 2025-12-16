@@ -43,7 +43,7 @@ module.exports = [
     },
     rules: {
       ...reactHooks.configs.recommended.rules,
-      'react-refresh/only-export-components': ['warn', { allowExportNames: ['useTheme'] }],
+      'react-refresh/only-export-components': 'warn',
     },
   },
 ];
