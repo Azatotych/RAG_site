@@ -1,26 +1,10 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import rehypeSanitize from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
 import { useTheme } from './theme';
 
 type Role = 'user' | 'assistant' | 'error';
-type Mode = 'gpt' | 'rag';
-
-type LibraryNode =
-  | {
-      id: string;
-      title: string;
-      type: 'section';
-      children: LibraryNode[];
-    }
-  | {
-      id: string;
-      title: string;
-      type: 'document';
-      category: string;
-      meta?: string;
-    };
 
 interface ChatMessage {
   id: string;
@@ -29,150 +13,19 @@ interface ChatMessage {
   meta?: string;
 }
 
-interface SelectedDocument {
-  id: string;
-  title: string;
-  category: string;
-  meta?: string;
-}
-
 const generateId = () => crypto.randomUUID?.() ?? `msg-${Date.now()}-${Math.random()}`;
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? '';
 const chatEndpoint = import.meta.env.VITE_CHAT_ENDPOINT ?? '';
 
-const mockLibraryTree: LibraryNode[] = [
-  {
-    id: 'study-materials',
-    title: 'Учебная литература',
-    type: 'section',
-    children: [
-      {
-        id: 'study-tactics',
-        title: 'Тематика: Тактика и стратегическое планирование',
-        type: 'section',
-        children: [
-          {
-            id: 'doc-field-manual',
-            title: 'Полевой устав. Выписка 2023',
-            category: 'Учебная литература',
-            meta: '2023',
-            type: 'document',
-          },
-          {
-            id: 'doc-training-memo',
-            title: 'Методическое пособие по работе с РЛС',
-            category: 'Учебная литература',
-            meta: '2022',
-            type: 'document',
-          },
-        ],
-      },
-    ],
-  },
-  {
-    id: 'orders-academy',
-    title: 'Приказы начальника академии',
-    type: 'section',
-    children: [
-      {
-        id: 'orders-2024',
-        title: '2024',
-        type: 'section',
-        children: [
-          {
-            id: 'order-2024-09-15-123',
-            title: '2024-09-15 №123',
-            category: 'Приказы начальника академии',
-            meta: '2024',
-            type: 'document',
-          },
-          {
-            id: 'order-2024-04-02-042',
-            title: '2024-04-02 №042',
-            category: 'Приказы начальника академии',
-            meta: '2024',
-            type: 'document',
-          },
-        ],
-      },
-    ],
-  },
-  {
-    id: 'orders-mod',
-    title: 'Приказы Министерства обороны',
-    type: 'section',
-    children: [
-      {
-        id: 'mod-2024',
-        title: '2024',
-        type: 'section',
-        children: [
-          {
-            id: 'mod-2024-10-01-310',
-            title: '2024-10-01 №310',
-            category: 'Приказы Министерства обороны',
-            meta: '2024',
-            type: 'document',
-          },
-          {
-            id: 'mod-2024-03-12-088',
-            title: '2024-03-12 №088',
-            category: 'Приказы Министерства обороны',
-            meta: '2024',
-            type: 'document',
-          },
-        ],
-      },
-    ],
-  },
-  {
-    id: 'internal-docs',
-    title: 'Внутренняя документация',
-    type: 'section',
-    children: [
-      {
-        id: 'internal-operations',
-        title: 'Раздел: Оперативные процедуры',
-        type: 'section',
-        children: [
-          {
-            id: 'internal-ops-checklist',
-            title: 'Чек-лист запуска смены связи',
-            category: 'Внутренняя документация',
-            meta: 'Версия 1.4',
-            type: 'document',
-          },
-          {
-            id: 'internal-ops-safety',
-            title: 'Правила безопасности на аппаратных узлах',
-            category: 'Внутренняя документация',
-            meta: 'Актуализировано 2024-05',
-            type: 'document',
-          },
-        ],
-      },
-    ],
-  },
-];
-
-function isDocument(node: LibraryNode): node is Extract<LibraryNode, { type: 'document' }> {
-  return node.type === 'document';
-}
-
 function App() {
   const { theme, toggleTheme } = useTheme();
-  const [mode, setMode] = useState<Mode>('gpt');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [stickToBottom, setStickToBottom] = useState(true);
-  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-  const [selectedDocs, setSelectedDocs] = useState<SelectedDocument[]>([]);
-  const [selectedMenuOpen, setSelectedMenuOpen] = useState(false);
-  const [toast, setToast] = useState<string | null>(null);
+  // State is intentionally in-memory only to align with the no-persistence requirement.
   const listRef = useRef<HTMLDivElement | null>(null);
-  const dropdownRef = useRef<HTMLDivElement | null>(null);
 
   const canSend = inputValue.trim().length > 0 && !isLoading;
 
@@ -197,36 +50,8 @@ function App() {
     listEl.scrollTo({ top: listEl.scrollHeight, behavior: 'smooth' });
   }, [messages, stickToBottom]);
 
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (selectedMenuOpen && dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
-        setSelectedMenuOpen(false);
-      }
-    };
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setIsDrawerOpen(false);
-        setSelectedMenuOpen(false);
-        setToast(null);
-      }
-    };
-
-    document.addEventListener('mousedown', handleClickOutside);
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-      document.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [selectedMenuOpen]);
-
-  useEffect(() => {
-    if (!toast) return undefined;
-    const timeout = window.setTimeout(() => setToast(null), 5000);
-    return () => window.clearTimeout(timeout);
-  }, [toast]);
-
-  const requestUrl = useMemo(() => (!apiBase || !chatEndpoint ? null : `${apiBase}${chatEndpoint}`), []);
+  // Construct the request URL once to avoid recomputing during renders.
+  const requestUrl = !apiBase || !chatEndpoint ? null : `${apiBase}${chatEndpoint}`;
 
   const createErrorMessage = (reason: string, requestUrlValue: string | null): ChatMessage => ({
     id: generateId(),
@@ -234,40 +59,6 @@ function App() {
     content: reason,
     meta: requestUrlValue ?? 'URL не задан',
   });
-
-  const resetUiState = () => {
-    setMessages([]);
-    setSelectedDocs([]);
-    setIsDrawerOpen(false);
-    setSelectedMenuOpen(false);
-  };
-
-  const handleModeChange = (nextMode: Mode) => {
-    if (nextMode === mode) return;
-    setMode(nextMode);
-    resetUiState();
-  };
-
-  const handleDocToggle = (doc: SelectedDocument) => {
-    const alreadySelected = selectedDocs.some((item) => item.id === doc.id);
-    if (alreadySelected) {
-      setSelectedDocs((prev) => prev.filter((item) => item.id !== doc.id));
-      return;
-    }
-
-    if (selectedDocs.length >= 10) {
-      setToast('Лимит контекста: 10 документов. Уберите один документ, чтобы добавить новый.');
-      return;
-    }
-
-    setSelectedDocs((prev) => [...prev, doc]);
-  };
-
-  const progressColorClass = () => {
-    if (selectedDocs.length >= 9) return 'progress danger';
-    if (selectedDocs.length >= 7) return 'progress warning';
-    return 'progress normal';
-  };
 
   const submitMessage = async (event?: FormEvent<HTMLFormElement>) => {
     event?.preventDefault();
@@ -304,9 +95,7 @@ function App() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          mode,
           messages: nextMessages.map(({ role, content }) => ({ role, content })),
-          selected_documents: mode === 'rag' ? selectedDocs.map((doc) => doc.id) : [],
           stream: false,
         }),
         signal: controller.signal,
@@ -377,66 +166,12 @@ function App() {
     setMessages([]);
   };
 
-  const renderNode = (node: LibraryNode) => {
-    if (isDocument(node)) {
-      const isSelected = selectedDocs.some((item) => item.id === node.id);
-      return (
-        <div key={node.id} className="doc-row">
-          <div className="doc-info">
-            <div className="doc-title">{node.title}</div>
-            <div className="doc-meta">{node.category}</div>
-          </div>
-          <button
-            type="button"
-            className={`doc-toggle ${isSelected ? 'selected' : ''}`}
-            onClick={() =>
-              handleDocToggle({ id: node.id, title: node.title, category: node.category, meta: node.meta })
-            }
-            aria-label={isSelected ? 'Убрать документ из контекста' : 'Добавить документ в контекст'}
-          >
-            {isSelected ? '✓' : '+'}
-          </button>
-        </div>
-      );
-    }
-
-    return (
-      <div key={node.id} className="section">
-        <div className="section-title">{node.title}</div>
-        <div className="section-children">{node.children.map((child) => renderNode(child))}</div>
-      </div>
-    );
-  };
-
   return (
     <div className="page">
-      {toast && (
-        <div className="toast" role="status" onClick={() => setToast(null)}>
-          {toast}
-        </div>
-      )}
       <header className="topbar">
-        <div className="topbar-left">
-          <h1 className="title" aria-label="Название чата">
-            Локальный ассистент
-          </h1>
-          <div className="mode-switch" role="group" aria-label="Переключатель режимов">
-            <button
-              type="button"
-              className={`mode-button ${mode === 'gpt' ? 'active' : ''}`}
-              onClick={() => handleModeChange('gpt')}
-            >
-              GPT режим
-            </button>
-            <button
-              type="button"
-              className={`mode-button ${mode === 'rag' ? 'active' : ''}`}
-              onClick={() => handleModeChange('rag')}
-            >
-              RAG режим
-            </button>
-          </div>
-        </div>
+        <h1 className="title" aria-label="Название чата">
+          Локальный ассистент
+        </h1>
         <div className="topbar-actions">
           <button
             className="ghost-button"
@@ -451,55 +186,6 @@ function App() {
           </button>
         </div>
       </header>
-
-      {mode === 'rag' && (
-        <div className="context-bar">
-          <div className="context-left">
-            <button className="primary-button" type="button" onClick={() => setIsDrawerOpen(true)}>
-              Выбрать литературу
-            </button>
-            <div className="context-progress" aria-label={`Выбрано документов: ${selectedDocs.length} из 10`}>
-              <div className="context-count">Контекст: {selectedDocs.length}/10</div>
-              <div className="progress-track">
-                <div className={progressColorClass()} style={{ width: `${(selectedDocs.length / 10) * 100}%` }} />
-              </div>
-            </div>
-          </div>
-          <div className="context-right" ref={dropdownRef}>
-            <button
-              type="button"
-              className="ghost-button dropdown-trigger"
-              onClick={() => setSelectedMenuOpen((prev) => !prev)}
-            >
-              Выбранные документы ▾
-            </button>
-            {selectedMenuOpen && (
-              <div className="dropdown" role="menu">
-                {selectedDocs.length === 0 ? (
-                  <div className="dropdown-empty">Документы не выбраны.</div>
-                ) : (
-                  selectedDocs.map((doc) => (
-                    <div key={doc.id} className="dropdown-item">
-                      <div className="dropdown-info">
-                        <span className="dropdown-title">{doc.title}</span>
-                        <span className="dropdown-meta">{doc.category}</span>
-                      </div>
-                      <button
-                        type="button"
-                        className="doc-remove"
-                        onClick={() => setSelectedDocs((prev) => prev.filter((item) => item.id !== doc.id))}
-                        aria-label="Убрать документ из контекста"
-                      >
-                        –
-                      </button>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       <main className="main">
         <section className="chat" aria-label="Лента сообщений">
@@ -575,24 +261,6 @@ function App() {
           </form>
         </section>
       </main>
-
-      {isDrawerOpen && (
-        <>
-          <div className="overlay" onClick={() => setIsDrawerOpen(false)} aria-label="Закрыть боковую панель" />
-          <aside className="drawer" role="dialog" aria-label="Выбор литературы">
-            <div className="drawer-header">
-              <h2>Литература</h2>
-              <button className="ghost-button" type="button" onClick={() => setIsDrawerOpen(false)} aria-label="Закрыть">
-                ×
-              </button>
-            </div>
-            <div className="drawer-search">
-              <input type="text" placeholder="Поиск (макет)" aria-label="Поиск по литературе" disabled />
-            </div>
-            <div className="drawer-content">{mockLibraryTree.map((node) => renderNode(node))}</div>
-          </aside>
-        </>
-      )}
     </div>
   );
 }
