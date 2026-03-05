@@ -1,19 +1,45 @@
 # Локальный ассистент (SPA)
 
-Минимальный чат-интерфейс на React + TypeScript + Vite для локального LLM/RAG backend.
+Frontend для локального LLM/RAG backend на `React + TypeScript + Vite`.
 
-Подробная инструкция по API и подключению backend находится в [BACKEND_INTEGRATION.md](./BACKEND_INTEGRATION.md).
+## Технологии
 
-Приложение умеет:
-- показывать чат с ответами модели;
-- переключать режим `RAG` и режим обычной нейросети;
-- загружать список документов с backend;
-- позволять выбрать до 10 источников через чекбоксы;
-- показывать шкалу заполнения лимита источников;
-- рендерить markdown-ответы модели;
-- сохранять только тему интерфейса в `localStorage`.
+- React 18
+- Vite 5
+- Tailwind CSS 3
+- Lucide React (иконки)
+- React Markdown (`remark-gfm`, `rehype-sanitize`)
 
-История сообщений и выбор документов живут только в памяти текущей вкладки.
+## Что умеет интерфейс
+
+- режимы `rag` и `chat`;
+- список документов из backend;
+- выбор источников для RAG;
+- загрузка документов через upload endpoint;
+- потоковый вывод ответа модели;
+- fallback на JSON-ответ `{ "reply": "..." }`;
+- локальные чаты с сохранением в `localStorage`;
+- рендер математических формул (KaTeX) в ответах модели;
+- светлая/темная тема.
+
+## Структура проекта
+
+```text
+src/
+  App.tsx
+  index.css
+  main.tsx
+  theme.tsx
+  features/chat/
+    config.ts
+    types.ts
+    utils.ts
+    components/
+      TopBar.tsx
+      LeftSidebar.tsx
+      ChatPanel.tsx
+      SourcesPanel.tsx
+```
 
 ## Запуск
 
@@ -22,55 +48,52 @@ npm install
 npm run dev
 ```
 
-Сборка:
+Dev сервер зафиксирован на `http://127.0.0.1:5173` (см. `vite.config.ts`).
+
+## Проверки
 
 ```bash
+npm run lint
 npm run build
 ```
 
 ## Переменные окружения
 
-Настройте адреса backend API через `.env` или переменные среды:
+Создайте `.env` на основе `.env.example`:
 
 ```env
 VITE_API_BASE_URL=http://localhost:8080
 VITE_CHAT_ENDPOINT=/api/chat
 VITE_DOCUMENTS_ENDPOINT=/api/documents
+VITE_UPLOAD_ENDPOINT=/api/documents/upload
+VITE_MODELS_ENDPOINT=/api/models
 ```
 
-`VITE_API_BASE_URL` можно оставить пустым, если frontend и backend работают на одном origin, а endpoints заданы как относительные пути.
+## API контракт (без изменений)
 
-## Контракт списка документов
+### `GET /api/documents`
 
-Frontend не может сам читать серверную директорию с файлами, поэтому backend должен отдать список документов отдельным endpoint.
-
-Ожидается `GET ${VITE_API_BASE_URL}${VITE_DOCUMENTS_ENDPOINT}`.
-
-Поддерживаются такие форматы ответа:
+Допустимы форматы:
 
 ```json
-[
-  "docs/report.pdf",
-  "docs/manual.docx"
-]
+{
+  "documents": [
+    { "id": "report", "name": "report.pdf", "path": "docs/report.pdf" }
+  ]
+}
 ```
 
 или:
 
 ```json
-{
-  "documents": [
-    { "id": "report", "name": "report.pdf", "path": "docs/report.pdf" },
-    { "id": "manual", "name": "manual.docx", "path": "docs/manual.docx" }
-  ]
-}
+[
+  "docs/report.pdf"
+]
 ```
 
-Также поддерживается ключ `items` вместо `documents`.
+### `POST /api/chat`
 
-## Контракт chat API
-
-Frontend отправляет `POST ${VITE_API_BASE_URL}${VITE_CHAT_ENDPOINT}` с телом:
+Frontend отправляет:
 
 ```json
 {
@@ -78,21 +101,43 @@ Frontend отправляет `POST ${VITE_API_BASE_URL}${VITE_CHAT_ENDPOINT}` �
     { "role": "user", "content": "..." },
     { "role": "assistant", "content": "..." }
   ],
-  "stream": false,
+  "stream": true,
+  "model": "qwen2.5",
   "mode": "rag",
   "sources": ["report", "manual"]
 }
 ```
 
-Где:
-- `mode` принимает `rag` или `chat`;
-- `sources` содержит выбранные документы только в `rag`-режиме;
-- frontend ограничивает выбор максимум 10 источниками.
+`model` передается опционально (если выбран в UI).
 
-Ожидаемый ответ:
+Ответ:
+
+- потоковый текст (если backend стримит),
+- или JSON `{ "reply": "..." }`.
+
+### `POST /api/documents/upload`
+
+Отправка `multipart/form-data` с полем `files`.
+
+### `GET /api/models`
+
+Список доступных моделей для селектора в UI. Поддерживаемые форматы:
 
 ```json
-{ "reply": "текст ответа ассистента" }
+{
+  "models": [
+    { "id": "qwen2.5", "label": "Qwen 2.5" },
+    { "id": "llama3.1", "label": "Llama 3.1" }
+  ]
+}
 ```
 
-Если backend недоступен, endpoint не настроен или API вернул ошибку, приложение продолжает работать и показывает ошибку в интерфейсе.
+или:
+
+```json
+["qwen2.5", "llama3.1"]
+```
+
+---
+
+Подробный backend-контракт: [BACKEND_INTEGRATION.md](./BACKEND_INTEGRATION.md).

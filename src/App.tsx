@@ -1,151 +1,265 @@
-import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import rehypeSanitize from 'rehype-sanitize';
-import remarkGfm from 'remark-gfm';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { emptyChatMessages, generateId, getRandomPlaceholder } from './features/chat/config';
+import { ChatPanel } from './features/chat/components/ChatPanel';
+import { LeftSidebar } from './features/chat/components/LeftSidebar';
+import { SourcesPanel } from './features/chat/components/SourcesPanel';
+import { TopBar } from './features/chat/components/TopBar';
+import { ChatMessage, ChatStorage, ModelMode, ModelOption, SourceDocument } from './features/chat/types';
+import { buildRequestUrl, cn, describeRequestFailure, parseDocumentsResponse, parseModelsResponse } from './features/chat/utils';
 import { useTheme } from './theme';
-
-type Role = 'user' | 'assistant' | 'error';
-type ModelMode = 'rag' | 'chat';
-
-interface ChatMessage {
-  id: string;
-  role: Role;
-  content: string;
-  meta?: string;
-}
-
-interface SourceDocument {
-  id: string;
-  name: string;
-  path?: string;
-}
-
-const sourceLimit = 10;
-const generateId = () => crypto.randomUUID?.() ?? `msg-${Date.now()}-${Math.random()}`;
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? '';
 const chatEndpoint = import.meta.env.VITE_CHAT_ENDPOINT ?? '';
 const documentsEndpoint = import.meta.env.VITE_DOCUMENTS_ENDPOINT ?? '';
+const uploadEndpoint = import.meta.env.VITE_UPLOAD_ENDPOINT ?? '';
+const modelsEndpoint = import.meta.env.VITE_MODELS_ENDPOINT ?? '';
 
-const buildRequestUrl = (base: string, endpoint: string) => {
-  if (!endpoint) return null;
-  if (/^https?:\/\//i.test(endpoint)) return endpoint;
-  if (!base) return endpoint;
+const chatsStorageKey = 'vas-chats-v1';
 
-  const normalizedBase = base.endsWith('/') ? base.slice(0, -1) : base;
-  const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
-  return `${normalizedBase}${normalizedEndpoint}`;
+interface PersistedChatState {
+  chats: Array<{ id: string; title: string; updatedAt: string }>;
+  activeChatId: string;
+  placeholdersByChat: Record<string, string>;
+  messagesByChat: ChatStorage;
+}
+
+const normalizeMessages = (value: unknown): ChatMessage[] => {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((item, index) => {
+      if (!item || typeof item !== 'object') return null;
+      const record = item as Record<string, unknown>;
+      const role = record.role;
+      const content = record.content;
+      const meta = record.meta;
+
+      if (role !== 'user' && role !== 'assistant' && role !== 'error') return null;
+      if (typeof content !== 'string') return null;
+
+      return {
+        id: typeof record.id === 'string' && record.id.trim() ? record.id : `${role}-${index + 1}`,
+        role,
+        content,
+        ...(typeof meta === 'string' ? { meta } : {}),
+      };
+    })
+    .filter((message): message is ChatMessage => Boolean(message));
 };
 
-const describeRequestFailure = (err: unknown, fallback: string) => {
-  if (err instanceof DOMException && err.name === 'AbortError') {
-    return 'Причина: превышено время ожидания ответа от API.';
-  }
-
-  if (err instanceof TypeError) {
-    const message = err.message.toLowerCase();
-    if (message.includes('name not resolved') || message.includes('dns')) {
-      return 'Причина: адрес API не найден (ошибка DNS или неверный URL).';
-    }
-    if (message.includes('failed to fetch')) {
-      return 'Причина: не удалось подключиться к серверу API (соединение отклонено или сервер не запущен).';
-    }
-  }
-
-  return fallback;
-};
-
-const normalizeDocument = (item: unknown, index: number): SourceDocument | null => {
-  if (typeof item === 'string') {
-    const trimmed = item.trim();
-    if (!trimmed) return null;
-
-    const parts = trimmed.split(/[\\/]/);
-    return {
-      id: trimmed,
-      name: parts[parts.length - 1] || trimmed,
-      path: trimmed,
-    };
-  }
-
-  if (!item || typeof item !== 'object') return null;
-
-  const record = item as Record<string, unknown>;
-  const rawId = record.id;
-  const rawName = record.name ?? record.title ?? record.filename;
-  const rawPath = record.path;
-
-  const path = typeof rawPath === 'string' && rawPath.trim() ? rawPath.trim() : undefined;
-  const id =
-    typeof rawId === 'string' && rawId.trim()
-      ? rawId.trim()
-      : path ??
-        (typeof rawName === 'string' && rawName.trim() ? rawName.trim() : `document-${index + 1}`);
-
-  const derivedName =
-    typeof rawName === 'string' && rawName.trim()
-      ? rawName.trim()
-      : path?.split(/[\\/]/).pop() ?? id;
-
+const normalizeMessagesByMode = (value: unknown) => {
+  const record = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
   return {
-    id,
-    name: derivedName,
-    path,
+    rag: normalizeMessages(record.rag),
+    chat: normalizeMessages(record.chat),
   };
 };
 
-const parseDocumentsResponse = (payload: unknown) => {
-  const rawDocuments = Array.isArray(payload)
-    ? payload
-    : payload &&
-        typeof payload === 'object' &&
-        Array.isArray((payload as { documents?: unknown[] }).documents)
-      ? (payload as { documents: unknown[] }).documents
-      : payload &&
-          typeof payload === 'object' &&
-          Array.isArray((payload as { items?: unknown[] }).items)
-        ? (payload as { items: unknown[] }).items
-        : null;
+const createDefaultChatState = (): PersistedChatState => {
+  const chatId = generateId();
+  return {
+    chats: [{ id: chatId, title: 'Новый чат', updatedAt: 'только что' }],
+    activeChatId: chatId,
+    placeholdersByChat: { [chatId]: getRandomPlaceholder() },
+    messagesByChat: { [chatId]: emptyChatMessages() },
+  };
+};
 
-  if (!rawDocuments) {
-    throw new Error('Некорректный формат списка документов.');
-  }
+const loadPersistedChatState = (): PersistedChatState => {
+  if (typeof window === 'undefined') return createDefaultChatState();
 
-  const seenIds = new Set<string>();
-  const documents = rawDocuments
-    .map((item, index) => normalizeDocument(item, index))
-    .filter((document): document is SourceDocument => Boolean(document))
-    .filter((document) => {
-      if (seenIds.has(document.id)) return false;
-      seenIds.add(document.id);
-      return true;
+  try {
+    const raw = window.localStorage.getItem(chatsStorageKey);
+    if (!raw) return createDefaultChatState();
+
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return createDefaultChatState();
+
+    const parsedRecord = parsed as Record<string, unknown>;
+    const rawChats = Array.isArray(parsedRecord.chats) ? parsedRecord.chats : [];
+    const seenIds = new Set<string>();
+    const chats = rawChats
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null;
+        const record = item as Record<string, unknown>;
+        const id = typeof record.id === 'string' ? record.id.trim() : '';
+        if (!id || seenIds.has(id)) return null;
+        seenIds.add(id);
+
+        return {
+          id,
+          title: typeof record.title === 'string' && record.title.trim() ? record.title : 'Без названия',
+          updatedAt:
+            typeof record.updatedAt === 'string' && record.updatedAt.trim()
+              ? record.updatedAt
+              : 'только что',
+        };
+      })
+      .filter((chat): chat is { id: string; title: string; updatedAt: string } => Boolean(chat));
+
+    if (chats.length === 0) return createDefaultChatState();
+
+    const requestedActiveChatId = typeof parsedRecord.activeChatId === 'string' ? parsedRecord.activeChatId : '';
+    const activeChatId = chats.some((chat) => chat.id === requestedActiveChatId)
+      ? requestedActiveChatId
+      : chats[0].id;
+
+    const rawMessagesByChat =
+      parsedRecord.messagesByChat && typeof parsedRecord.messagesByChat === 'object'
+        ? (parsedRecord.messagesByChat as Record<string, unknown>)
+        : {};
+    const rawPlaceholdersByChat =
+      parsedRecord.placeholdersByChat && typeof parsedRecord.placeholdersByChat === 'object'
+        ? (parsedRecord.placeholdersByChat as Record<string, unknown>)
+        : {};
+
+    const messagesByChat: ChatStorage = {};
+    const placeholdersByChat: Record<string, string> = {};
+    chats.forEach((chat) => {
+      messagesByChat[chat.id] = normalizeMessagesByMode(rawMessagesByChat[chat.id]);
+      const placeholder = rawPlaceholdersByChat[chat.id];
+      placeholdersByChat[chat.id] =
+        typeof placeholder === 'string' && placeholder.trim() ? placeholder : getRandomPlaceholder();
     });
 
-  return documents;
+    return { chats, activeChatId, placeholdersByChat, messagesByChat };
+  } catch {
+    return createDefaultChatState();
+  }
 };
 
 function App() {
+  const initialChatState = useMemo(loadPersistedChatState, []);
   const { theme, toggleTheme } = useTheme();
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+
+  const [mode, setMode] = useState<ModelMode>('rag');
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+  const [selectedModel, setSelectedModel] = useState('');
+  const [isModelsLoading, setIsModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+
+  const [chats, setChats] = useState(initialChatState.chats);
+  const [activeChatId, setActiveChatId] = useState<string>(initialChatState.activeChatId);
+  const [placeholdersByChat, setPlaceholdersByChat] = useState<Record<string, string>>(
+    initialChatState.placeholdersByChat
+  );
+  const [messagesByChat, setMessagesByChat] = useState<ChatStorage>(initialChatState.messagesByChat);
+
+  const [editingChatId, setEditingChatId] = useState<string | null>(null);
+  const [chatTitleDraft, setChatTitleDraft] = useState('');
+
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [stickToBottom, setStickToBottom] = useState(true);
-  const [modelMode, setModelMode] = useState<ModelMode>('rag');
+
   const [documents, setDocuments] = useState<SourceDocument[]>([]);
   const [selectedDocuments, setSelectedDocuments] = useState<string[]>([]);
+  const [sourceQuery, setSourceQuery] = useState('');
   const [isDocumentsLoading, setIsDocumentsLoading] = useState(false);
   const [documentsError, setDocumentsError] = useState<string | null>(null);
-  // State is intentionally in-memory only to align with the no-persistence requirement.
+  const [isUploading, setIsUploading] = useState(false);
+
   const listRef = useRef<HTMLDivElement | null>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
 
   const requestUrl = buildRequestUrl(apiBase, chatEndpoint);
   const documentsUrl = buildRequestUrl(apiBase, documentsEndpoint);
+  const uploadUrl = buildRequestUrl(apiBase, uploadEndpoint);
+  const modelsUrl = buildRequestUrl(apiBase, modelsEndpoint);
+
+  const messages = useMemo(() => messagesByChat[activeChatId]?.[mode] ?? [], [messagesByChat, activeChatId, mode]);
   const selectedCount = selectedDocuments.length;
-  const selectedProgress = Math.round((selectedCount / sourceLimit) * 100);
-  const canSend =
-    inputValue.trim().length > 0 &&
-    !isLoading &&
-    (modelMode === 'chat' || selectedDocuments.length > 0);
+  const canSend = inputValue.trim().length > 0 && !isLoading && (mode === 'chat' || selectedCount > 0);
+  const activeChat = chats.find((chat) => chat.id === activeChatId);
+  const activePlaceholder = placeholdersByChat[activeChatId] ?? 'Спросите что-нибудь';
+  const filteredDocuments = useMemo(() => {
+    const query = sourceQuery.trim().toLowerCase();
+    if (!query) return documents;
+    return documents.filter((document) => document.name.toLowerCase().includes(query));
+  }, [documents, sourceQuery]);
+
+  useEffect(() => {
+    if (!editingChatId) return;
+    window.setTimeout(() => renameInputRef.current?.focus(), 0);
+  }, [editingChatId]);
+
+  useEffect(() => {
+    setPlaceholdersByChat((prev) => {
+      if (prev[activeChatId]) return prev;
+      return { ...prev, [activeChatId]: getRandomPlaceholder() };
+    });
+  }, [activeChatId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!chats.length) return;
+
+    const activeId = chats.some((chat) => chat.id === activeChatId) ? activeChatId : chats[0].id;
+    const nextMessagesByChat: ChatStorage = {};
+    const nextPlaceholdersByChat: Record<string, string> = {};
+
+    chats.forEach((chat) => {
+      nextMessagesByChat[chat.id] = messagesByChat[chat.id] ?? emptyChatMessages();
+      nextPlaceholdersByChat[chat.id] = placeholdersByChat[chat.id] ?? getRandomPlaceholder();
+    });
+
+    const payload: PersistedChatState = {
+      chats,
+      activeChatId: activeId,
+      messagesByChat: nextMessagesByChat,
+      placeholdersByChat: nextPlaceholdersByChat,
+    };
+
+    window.localStorage.setItem(chatsStorageKey, JSON.stringify(payload));
+  }, [chats, activeChatId, messagesByChat, placeholdersByChat]);
+
+  const loadModels = useCallback(async () => {
+    if (!modelsUrl) {
+      setModelOptions([]);
+      setSelectedModel('');
+      setModelsError('Не задан адрес списка моделей (VITE_MODELS_ENDPOINT).');
+      return;
+    }
+
+    setIsModelsLoading(true);
+    setModelsError(null);
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 10000);
+
+    try {
+      const response = await fetch(modelsUrl, {
+        method: 'GET',
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        setModelOptions([]);
+        setSelectedModel('');
+        setModelsError(`Не удалось загрузить модели: HTTP ${response.status} ${response.statusText}.`);
+        return;
+      }
+
+      const nextModels = parseModelsResponse(await response.json());
+      setModelOptions(nextModels);
+      setSelectedModel((prev) => {
+        if (prev && nextModels.some((model) => model.id === prev)) return prev;
+        return nextModels[0]?.id ?? '';
+      });
+      setModelsError(null);
+    } catch (err) {
+      setModelOptions([]);
+      setSelectedModel('');
+      setModelsError(describeRequestFailure(err, 'Не удалось загрузить модели из backend.'));
+    } finally {
+      window.clearTimeout(timeoutId);
+      setIsModelsLoading(false);
+    }
+  }, [modelsUrl]);
+
+  useEffect(() => {
+    void loadModels();
+  }, [loadModels]);
 
   useEffect(() => {
     const listEl = listRef.current;
@@ -153,7 +267,7 @@ function App() {
 
     const handleScroll = () => {
       const distanceFromBottom = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight;
-      setStickToBottom(distanceFromBottom < 48);
+      setStickToBottom(distanceFromBottom < 56);
     };
 
     listEl.addEventListener('scroll', handleScroll);
@@ -162,10 +276,8 @@ function App() {
 
   useEffect(() => {
     if (!stickToBottom) return;
-
     const listEl = listRef.current;
     if (!listEl) return;
-
     listEl.scrollTo({ top: listEl.scrollHeight, behavior: 'smooth' });
   }, [messages, stickToBottom]);
 
@@ -175,6 +287,26 @@ function App() {
     content: reason,
     meta: requestUrlValue ?? 'URL не задан',
   });
+
+  const setActiveModeMessages = useCallback(
+    (updater: (prev: ChatMessage[]) => ChatMessage[]) => {
+      setMessagesByChat((prev) => {
+        const currentChat = prev[activeChatId] ?? emptyChatMessages();
+        return {
+          ...prev,
+          [activeChatId]: {
+            ...currentChat,
+            [mode]: updater(currentChat[mode] ?? []),
+          },
+        };
+      });
+    },
+    [activeChatId, mode]
+  );
+
+  const touchActiveChat = useCallback(() => {
+    setChats((prev) => prev.map((chat) => (chat.id === activeChatId ? { ...chat, updatedAt: 'только что' } : chat)));
+  }, [activeChatId]);
 
   const loadDocuments = useCallback(async () => {
     if (!documentsUrl) {
@@ -203,20 +335,16 @@ function App() {
         return;
       }
 
-      const payload = await response.json();
-      const nextDocuments = parseDocumentsResponse(payload);
-
+      const nextDocuments = parseDocumentsResponse(await response.json());
       setDocuments(nextDocuments);
       setSelectedDocuments((prev) =>
-        prev.filter((documentId) => nextDocuments.some((document) => document.id === documentId)).slice(0, sourceLimit)
+        prev.filter((documentId) => nextDocuments.some((document) => document.id === documentId))
       );
       setDocumentsError(null);
     } catch (err) {
       setDocuments([]);
       setSelectedDocuments([]);
-      setDocumentsError(
-        describeRequestFailure(err, 'Не удалось загрузить документы из backend. Проверьте доступность API.')
-      );
+      setDocumentsError(describeRequestFailure(err, 'Не удалось загрузить документы из backend.'));
       console.error('Failed to load documents', err);
     } finally {
       window.clearTimeout(timeoutId);
@@ -228,19 +356,99 @@ function App() {
     void loadDocuments();
   }, [loadDocuments]);
 
-  const toggleDocument = (documentId: string) => {
-    setDocumentsError(null);
-    setSelectedDocuments((prev) => {
-      if (prev.includes(documentId)) {
-        return prev.filter((id) => id !== documentId);
+  const uploadFiles = useCallback(
+    async (files: File[]) => {
+      if (!uploadUrl) {
+        setDocumentsError('Не задан адрес загрузки (VITE_UPLOAD_ENDPOINT).');
+        return;
       }
 
-      if (prev.length >= sourceLimit) {
-        setDocumentsError(`Можно выбрать не более ${sourceLimit} источников.`);
-        return prev;
-      }
+      setIsUploading(true);
+      setDocumentsError(null);
 
-      return [...prev, documentId];
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 600000);
+
+      try {
+        const formData = new FormData();
+        files.forEach((file) => formData.append('files', file));
+
+        const response = await fetch(uploadUrl, {
+          method: 'POST',
+          body: formData,
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          const details = await response.text().catch(() => '');
+          setDocumentsError(`Ошибка загрузки: HTTP ${response.status} ${response.statusText}. ${details}`);
+          return;
+        }
+
+        await loadDocuments();
+      } catch (err) {
+        setDocumentsError(describeRequestFailure(err, 'Не удалось загрузить файлы.'));
+        console.error('Upload failed', err);
+      } finally {
+        window.clearTimeout(timeoutId);
+        setIsUploading(false);
+      }
+    },
+    [uploadUrl, loadDocuments]
+  );
+
+  const createNewChat = () => {
+    const chatId = generateId();
+    const chatTitle = mode === 'rag' ? 'Новый RAG чат' : 'Новый чат';
+
+    setChats((prev) => [{ id: chatId, title: chatTitle, updatedAt: 'только что' }, ...prev]);
+    setMessagesByChat((prev) => ({ ...prev, [chatId]: emptyChatMessages() }));
+    setPlaceholdersByChat((prev) => ({ ...prev, [chatId]: getRandomPlaceholder() }));
+    setActiveChatId(chatId);
+  };
+
+  const commitRenameChat = () => {
+    if (!editingChatId) return;
+    const nextTitle = chatTitleDraft.trim() || 'Без названия';
+
+    setChats((prev) =>
+      prev.map((chat) =>
+        chat.id === editingChatId ? { ...chat, title: nextTitle, updatedAt: 'только что' } : chat
+      )
+    );
+    setEditingChatId(null);
+    setChatTitleDraft('');
+  };
+
+  const cancelRenameChat = () => {
+    setEditingChatId(null);
+    setChatTitleDraft('');
+  };
+
+  const deleteChat = (chatId: string) => {
+    if (chats.length === 1) {
+      setMessagesByChat((prev) => ({ ...prev, [chatId]: emptyChatMessages() }));
+      return;
+    }
+
+    setChats((prev) => {
+      const next = prev.filter((chat) => chat.id !== chatId);
+      if (activeChatId === chatId && next[0]) {
+        setActiveChatId(next[0].id);
+      }
+      return next;
+    });
+
+    setMessagesByChat((prev) => {
+      const next = { ...prev };
+      delete next[chatId];
+      return next;
+    });
+
+    setPlaceholdersByChat((prev) => {
+      const next = { ...prev };
+      delete next[chatId];
+      return next;
     });
   };
 
@@ -253,320 +461,195 @@ function App() {
       role: 'user',
       content: inputValue.trim(),
     };
-
     const nextMessages = [...messages, userMessage];
     const requestMessages = nextMessages
       .filter((message) => message.role !== 'error')
       .map(({ role, content }) => ({ role, content }));
 
-    setMessages(nextMessages);
+    const assistantId = generateId();
+    setActiveModeMessages(() => [...nextMessages, { id: assistantId, role: 'assistant', content: '' }]);
     setInputValue('');
     setIsLoading(true);
+    touchActiveChat();
 
     if (!requestUrl) {
-      const errorMessage = createErrorMessage(
-        'Причина: не задан адрес API (VITE_API_BASE_URL или VITE_CHAT_ENDPOINT).',
-        requestUrl
-      );
-      setMessages((prev) => [...prev, errorMessage]);
+      const errorMessage = createErrorMessage('Причина: не задан адрес API.', requestUrl);
+      setActiveModeMessages((prev) => prev.filter((message) => message.id !== assistantId).concat(errorMessage));
       setIsLoading(false);
       return;
     }
 
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 15000);
+    const timeoutId = window.setTimeout(() => controller.abort(), 600000);
 
     try {
+      const requestPayload = {
+        messages: requestMessages,
+        stream: true,
+        mode,
+        sources: mode === 'rag' ? selectedDocuments : [],
+        ...(selectedModel ? { model: selectedModel } : {}),
+      };
+
       const response = await fetch(requestUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messages: requestMessages,
-          stream: false,
-          mode: modelMode,
-          sources: modelMode === 'rag' ? selectedDocuments : [],
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestPayload),
         signal: controller.signal,
       });
 
       if (!response.ok) {
+        const details = await response.text().catch(() => '');
         const errorMessage = createErrorMessage(
-          `Причина: сервер API вернул HTTP ${response.status} ${response.statusText}.`,
+          `Причина: сервер API вернул HTTP ${response.status} ${response.statusText}.${details ? `\n${details}` : ''}`,
           requestUrl
         );
-        setMessages((prev) => [...prev, errorMessage]);
+        setActiveModeMessages((prev) => prev.filter((message) => message.id !== assistantId).concat(errorMessage));
         return;
       }
 
-      let data: { reply?: string } | null = null;
-      try {
-        data = await response.json();
-      } catch (err) {
-        const errorMessage = createErrorMessage(
-          'Причина: API вернул некорректный ответ (не JSON или отсутствует поле reply).',
-          requestUrl
+      const contentType = response.headers.get('content-type') ?? '';
+      if (contentType.includes('application/json')) {
+        const data = (await response.json().catch(() => null)) as { reply?: string } | null;
+        if (!data?.reply) {
+          const errorMessage = createErrorMessage('Причина: JSON без поля reply.', requestUrl);
+          setActiveModeMessages((prev) => prev.filter((message) => message.id !== assistantId).concat(errorMessage));
+          return;
+        }
+
+        setActiveModeMessages((prev) =>
+          prev.map((message) =>
+            message.id === assistantId ? { ...message, content: data.reply ?? '' } : message
+          )
         );
-        setMessages((prev) => [...prev, errorMessage]);
-        console.error('Failed to parse JSON', err);
         return;
       }
 
-      const replyText = data?.reply;
-      if (!replyText) {
-        const errorMessage = createErrorMessage(
-          'Причина: API вернул некорректный ответ (не JSON или отсутствует поле reply).',
-          requestUrl
-        );
-        setMessages((prev) => [...prev, errorMessage]);
+      if (!response.body) {
+        const errorMessage = createErrorMessage('Причина: response.body отсутствует.', requestUrl);
+        setActiveModeMessages((prev) => prev.filter((message) => message.id !== assistantId).concat(errorMessage));
         return;
       }
 
-      const assistantMessage: ChatMessage = {
-        id: generateId(),
-        role: 'assistant',
-        content: replyText,
-      };
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let accumulated = '';
 
-      setMessages((prev) => [...prev, assistantMessage]);
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        accumulated += decoder.decode(value, { stream: true });
+        setActiveModeMessages((prev) =>
+          prev.map((message) =>
+            message.id === assistantId ? { ...message, content: accumulated } : message
+          )
+        );
+      }
     } catch (err) {
-      const reason = describeRequestFailure(
-        err,
-        'Причина: не удалось подключиться к серверу API (соединение отклонено или сервер не запущен).'
+      const errorMessage = createErrorMessage(
+        describeRequestFailure(err, 'Причина: нет соединения с API.'),
+        requestUrl
       );
-
-      const errorMessage = createErrorMessage(reason, requestUrl);
-      setMessages((prev) => [...prev, errorMessage]);
-      console.error('API request failed', err);
+      setActiveModeMessages((prev) => prev.filter((message) => message.id !== assistantId).concat(errorMessage));
     } finally {
       window.clearTimeout(timeoutId);
       setIsLoading(false);
     }
   };
 
-  const clearChat = () => {
-    setMessages([]);
-  };
-
   return (
-    <div className="page">
-      <header className="topbar">
-        <h1 className="title" aria-label="Название чата">
-          Локальный ассистент
-        </h1>
-        <div className="topbar-actions">
-          <button
-            className="ghost-button"
-            type="button"
-            onClick={toggleTheme}
-            aria-label={`Переключить тему на ${theme === 'light' ? 'тёмную' : 'светлую'}`}
-          >
-            {theme === 'light' ? 'Тёмная тема' : 'Светлая тема'}
-          </button>
-          <button className="ghost-button" type="button" onClick={clearChat} aria-label="Очистить чат">
-            Очистить чат
-          </button>
-        </div>
-      </header>
+    <div className="flex min-h-screen flex-col">
+      <TopBar
+        mode={mode}
+        activeChatTitle={activeChat?.title ?? 'Чат'}
+        selectedModelLabel={modelOptions.find((model) => model.id === selectedModel)?.label ?? 'модель не выбрана'}
+      />
 
-      <main className="main">
-        <div className="workspace">
-          <aside className="control-panel" aria-label="Панель настроек RAG">
-            <section className="panel-card">
-              <div className="panel-header">
-                <div>
-                  <h2 className="panel-title">Режим модели</h2>
-                  <p className="panel-description">
-                    Переключайте обычный чат и режим с использованием выбранных источников.
-                  </p>
-                </div>
-              </div>
-              <div className="mode-switch" role="tablist" aria-label="Режим модели">
-                <button
-                  type="button"
-                  className={`mode-button ${modelMode === 'rag' ? 'active' : ''}`}
-                  onClick={() => setModelMode('rag')}
-                  aria-pressed={modelMode === 'rag'}
-                >
-                  RAG режим
-                </button>
-                <button
-                  type="button"
-                  className={`mode-button ${modelMode === 'chat' ? 'active' : ''}`}
-                  onClick={() => setModelMode('chat')}
-                  aria-pressed={modelMode === 'chat'}
-                >
-                  Обычная нейросеть
-                </button>
-              </div>
-              <p className="mode-hint">
-                {modelMode === 'rag'
-                  ? 'В запрос будут переданы только отмеченные источники.'
-                  : 'Источники можно отметить заранее, но в этом режиме они не отправляются в модель.'}
-              </p>
-            </section>
+      <main
+        className={cn(
+          'grid min-h-0 flex-1 gap-3 p-3 lg:overflow-hidden',
+          mode === 'rag'
+            ? 'grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)_380px]'
+            : 'grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)]'
+        )}
+      >
+        <LeftSidebar
+          mode={mode}
+          selectedModel={selectedModel}
+          modelOptions={modelOptions}
+          isModelsLoading={isModelsLoading}
+          modelsError={modelsError}
+          chats={chats}
+          activeChatId={activeChatId}
+          editingChatId={editingChatId}
+          chatTitleDraft={chatTitleDraft}
+          renameInputRef={renameInputRef}
+          themeLabel={theme === 'light' ? 'светлая' : 'темная'}
+          onCreateChat={createNewChat}
+          onModeChange={setMode}
+          onModelChange={setSelectedModel}
+          onSelectChat={setActiveChatId}
+          onStartRename={(chatId, title) => {
+            setEditingChatId(chatId);
+            setChatTitleDraft(title);
+          }}
+          onRenameDraftChange={setChatTitleDraft}
+          onCommitRename={commitRenameChat}
+          onCancelRename={cancelRenameChat}
+          onDeleteChat={deleteChat}
+          onClearActiveChat={() => setActiveModeMessages(() => [])}
+          onToggleTheme={toggleTheme}
+        />
 
-            <section className="panel-card">
-              <div className="panel-header">
-                <div>
-                  <h2 className="panel-title">Источники</h2>
-                  <p className="panel-description">
-                    Backend должен вернуть список документов из рабочей директории модели.
-                  </p>
-                </div>
-                <button type="button" className="ghost-button compact-button" onClick={() => void loadDocuments()}>
-                  Обновить
-                </button>
-              </div>
+        <ChatPanel
+          mode={mode}
+          messages={messages}
+          placeholder={activePlaceholder}
+          inputValue={inputValue}
+          canSend={canSend}
+          isLoading={isLoading}
+          isUploading={isUploading}
+          uploadEnabled={Boolean(uploadUrl)}
+          listRef={listRef}
+          onInputChange={setInputValue}
+          onSubmit={submitMessage}
+          onUploadFiles={(files) => {
+            void uploadFiles(files);
+          }}
+        />
 
-              <div className="source-summary">
-                <div className="source-summary-row">
-                  <span>
-                    Выбрано {selectedCount} из {sourceLimit}
-                  </span>
-                  <span>{selectedProgress}%</span>
-                </div>
-                <div
-                  className={`progress-track ${
-                    selectedCount === sourceLimit ? 'is-full' : selectedCount >= sourceLimit - 2 ? 'is-warning' : ''
-                  }`}
-                  aria-hidden="true"
-                >
-                  <div className="progress-fill" style={{ width: `${selectedProgress}%` }} />
-                </div>
-              </div>
-
-              {documentsError && <div className="panel-status error">{documentsError}</div>}
-              {!documentsError && isDocumentsLoading && <div className="panel-status">Загрузка списка документов…</div>}
-
-              {!isDocumentsLoading && documents.length === 0 && !documentsError ? (
-                <div className="panel-empty">Список документов пуст. Добавьте файлы в индексируемую директорию backend.</div>
-              ) : (
-                <div className="document-list" role="list" aria-label="Список документов">
-                  {documents.map((document) => {
-                    const checked = selectedDocuments.includes(document.id);
-                    const disableUnchecked = !checked && selectedCount >= sourceLimit;
-
-                    return (
-                      <label
-                        key={document.id}
-                        className={`document-item ${checked ? 'selected' : ''} ${disableUnchecked ? 'blocked' : ''}`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => toggleDocument(document.id)}
-                          disabled={disableUnchecked}
-                          aria-label={`Использовать документ ${document.name}`}
-                        />
-                        <span className="document-copy">
-                          <span className="document-name">{document.name}</span>
-                          {document.path && <span className="document-path">{document.path}</span>}
-                        </span>
-                      </label>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-          </aside>
-
-          <section className="chat" aria-label="Лента сообщений">
-            <div ref={listRef} className="messages" role="log" aria-live="polite">
-              {messages.length === 0 && (
-                <div className="empty">
-                  {modelMode === 'rag'
-                    ? 'Выберите источники и начните диалог, чтобы ассистент отвечал с учётом документов.'
-                    : 'Начните диалог, чтобы увидеть ответы ассистента.'}
-                </div>
-              )}
-              {messages.map((message) => (
-                <article
-                  key={message.id}
-                  className={`bubble ${message.role}`}
-                  aria-label={
-                    message.role === 'user'
-                      ? 'Сообщение пользователя'
-                      : message.role === 'assistant'
-                        ? 'Сообщение ассистента'
-                        : 'Сообщение об ошибке'
-                  }
-                >
-                  {message.role === 'assistant' ? (
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      rehypePlugins={[rehypeSanitize]}
-                      components={{
-                        a: (props) => (
-                          <a {...props} target="_blank" rel="noreferrer">
-                            {props.children}
-                          </a>
-                        ),
-                      }}
-                      className="message-text"
-                    >
-                      {message.content}
-                    </ReactMarkdown>
-                  ) : message.role === 'error' ? (
-                    <div className="message-text error-text">
-                      <div className="error-title">Ошибка: модель недоступна</div>
-                      <div className="error-reason">{message.content}</div>
-                      <div className="error-meta">URL: {message.meta}</div>
-                    </div>
-                  ) : (
-                    <p className="message-text">{message.content}</p>
-                  )}
-                </article>
-              ))}
-            </div>
-
-            <form className="composer" onSubmit={submitMessage} aria-label="Форма ввода сообщения">
-              <div className="composer-header">
-                <div>
-                  <h2 className="panel-title">Запрос</h2>
-                  <p className="panel-description">
-                    {modelMode === 'rag'
-                      ? selectedCount > 0
-                        ? `В запрос уйдут ${selectedCount} выбранных источников.`
-                        : 'Для RAG-режима выберите хотя бы один источник.'
-                      : 'Будет выполнен обычный запрос без RAG-источников.'}
-                  </p>
-                </div>
-                <span className="mode-badge">{modelMode === 'rag' ? 'RAG' : 'CHAT'}</span>
-              </div>
-
-              <label className="sr-only" htmlFor="message-input">
-                Введите сообщение
-              </label>
-              <textarea
-                id="message-input"
-                className="input"
-                value={inputValue}
-                placeholder="Напишите сообщение и нажмите Enter"
-                onChange={(event) => setInputValue(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && !event.shiftKey) {
-                    event.preventDefault();
-                    void submitMessage();
-                  }
-                }}
-                disabled={isLoading}
-                aria-label="Поле ввода сообщения"
-                rows={4}
-              />
-              <div className="composer-actions">
-                {!canSend && modelMode === 'rag' && selectedCount === 0 && (
-                  <span className="status warning">Выберите хотя бы 1 источник</span>
-                )}
-                {isLoading && <span className="status">Генерация…</span>}
-                <button type="submit" className="primary-button" disabled={!canSend} aria-label="Отправить сообщение">
-                  Отправить
-                </button>
-              </div>
-            </form>
-          </section>
-        </div>
+        {mode === 'rag' && (
+          <SourcesPanel
+            sourceQuery={sourceQuery}
+            selectedCount={selectedCount}
+            documentsError={documentsError}
+            isUploading={isUploading}
+            isDocumentsLoading={isDocumentsLoading}
+            uploadEnabled={Boolean(uploadUrl)}
+            documents={filteredDocuments}
+            selectedDocuments={selectedDocuments}
+            onQueryChange={setSourceQuery}
+            onUploadFiles={(files) => {
+              void uploadFiles(files);
+            }}
+            onReload={() => {
+              void loadDocuments();
+            }}
+            onSelectAll={() => {
+              setSelectedDocuments(documents.map((document) => document.id));
+            }}
+            onClearSelection={() => {
+              setSelectedDocuments([]);
+            }}
+            onToggleDocument={(documentId) => {
+              setDocumentsError(null);
+              setSelectedDocuments((prev) =>
+                prev.includes(documentId) ? prev.filter((id) => id !== documentId) : [...prev, documentId]
+              );
+            }}
+          />
+        )}
       </main>
     </div>
   );

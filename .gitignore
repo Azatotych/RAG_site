@@ -7,7 +7,5 @@ yarn-error.log*
 .vscode
 .idea
 *.tsbuildinfo
-vite.config.js
-vite.config.d.ts
 # Keep the ignore list aligned with Vite outputs for cleanliness.
 # End of ignore list
